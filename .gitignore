@@ -1,0 +1,20 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# next
+/.next/
+/out/
+
+# env (plantilla versionada: .env.example)
+.env*
+!.env.example
+
+# debug
+npm-debug.log*
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
+.cursor
