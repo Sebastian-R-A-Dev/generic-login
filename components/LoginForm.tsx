@@ -1,7 +1,12 @@
 "use client";
 
 import { MandatoryPasswordChange } from "@/components/MandatoryPasswordChange";
-import { getLoginErrorMessage, loginWithRedirect } from "@/services/login/login.service";
+import {
+  getLoginErrorMessage,
+  isLoginRateLimited,
+  loginWithEmergencyCode,
+  loginWithRedirect,
+} from "@/services/login/login.service";
 import { goAfterLogin } from "@/services/login/navigate";
 import { pickPostLoginRedirect } from "@/lib/post-login-redirect";
 import type { LoginSuccessPayload } from "@/lib/login-response";
@@ -28,6 +33,14 @@ function IconLock({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
       <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
       <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  );
+}
+
+function IconKey({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+      <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
     </svg>
   );
 }
@@ -102,9 +115,12 @@ function LoginFormContent() {
   const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [emergencyCode, setEmergencyCode] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [rateLimited, setRateLimited] = useState(false);
+  const [emergencyMode, setEmergencyMode] = useState(false);
   const [postLogin, setPostLogin] = useState<LoginSuccessPayload | null>(null);
 
   const appsMap = getRegisteredAppsFromEnv();
@@ -114,11 +130,13 @@ function LoginFormContent() {
     null;
   const redirectUrlFromQuery = searchParams.get("redirect_url")?.trim() || null;
   const displayedAppId = resolveDisplayedAppId(queryApp, appsMap);
+  const isAdminApp = displayedAppId === "ADMIN_APP";
 
-  const subtitle =
-    displayedAppId === "ADMIN_APP"
-      ? "Sign in to access your dashboard"
-      : "Sign in to your app";
+  const subtitle = isAdminApp
+    ? emergencyMode
+      ? "Enter your email and emergency security code"
+      : "Sign in to access your dashboard"
+    : "Sign in to your app";
 
   const registerHref = useMemo(() => {
     const p = new URLSearchParams();
@@ -128,13 +146,49 @@ function LoginFormContent() {
     return q ? `/register?${q}` : "/register";
   }, [queryApp, redirectUrlFromQuery]);
 
+  async function finishLogin(result: LoginSuccessPayload) {
+    if (result.pendingPasswordChange) {
+      setPostLogin(result);
+      return;
+    }
+    const target = pickPostLoginRedirect(redirectUrlFromQuery, result.redirectUrl, appsMap);
+    goAfterLogin(router, target);
+  }
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
-    if (!email.trim() || !password) {
+
+    if (!email.trim()) {
+      setError("Enter your email.");
+      return;
+    }
+
+    if (emergencyMode) {
+      if (!emergencyCode.trim()) {
+        setError("Enter the emergency security code.");
+        return;
+      }
+      setLoading(true);
+      try {
+        const result = await loginWithEmergencyCode({
+          email: email.trim(),
+          emergency_code: emergencyCode.trim(),
+        });
+        await finishLogin(result);
+      } catch (err) {
+        setError(getLoginErrorMessage(err));
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    if (!password) {
       setError("Enter email and password.");
       return;
     }
+
     setLoading(true);
     try {
       const result = await loginWithRedirect({
@@ -142,13 +196,12 @@ function LoginFormContent() {
         email: email.trim(),
         password: password.trim(),
       });
-      if (result.pendingPasswordChange) {
-        setPostLogin(result);
-        return;
-      }
-      const target = pickPostLoginRedirect(redirectUrlFromQuery, result.redirectUrl, appsMap);
-      goAfterLogin(router, target);
+      setRateLimited(false);
+      await finishLogin(result);
     } catch (err) {
+      if (isAdminApp && isLoginRateLimited(err)) {
+        setRateLimited(true);
+      }
       setError(getLoginErrorMessage(err));
     } finally {
       setLoading(false);
@@ -205,37 +258,58 @@ function LoginFormContent() {
           </div>
         </div>
 
-        <div>
-          <label htmlFor="password" className="mb-1.5 block text-sm font-medium text-slate-800">
-            Password
-          </label>
-          <div className="input-glass flex items-center gap-2 px-3 py-2.5 hover:border-slate-300/80">
-            <IconLock className="h-5 w-5 shrink-0 text-slate-500" />
-            <input
-              id="password"
-              name="password"
-              type={showPassword ? "text" : "password"}
-              autoComplete="current-password"
-              placeholder="••••••••"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="min-w-0 flex-1 bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassword((v) => !v)}
-              className="flex shrink-0 items-center gap-1 text-xs font-medium text-slate-500 transition hover:text-portal-blue focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-portal-blue"
-            >
-              <span className="hidden sm:inline">view</span>
-              {showPassword ? (
-                <IconEyeOff className="h-5 w-5" aria-hidden />
-              ) : (
-                <IconEye className="h-5 w-5" aria-hidden />
-              )}
-              <span className="sr-only">{showPassword ? "Hide password" : "Show password"}</span>
-            </button>
+        {emergencyMode ? (
+          <div>
+            <label htmlFor="emergency_code" className="mb-1.5 block text-sm font-medium text-slate-800">
+              Código de seguridad
+            </label>
+            <div className="input-glass flex items-center gap-2 px-3 py-2.5 hover:border-slate-300/80">
+              <IconKey className="h-5 w-5 shrink-0 text-slate-500" />
+              <input
+                id="emergency_code"
+                name="emergency_code"
+                type="text"
+                autoComplete="off"
+                placeholder="Emergency security code"
+                value={emergencyCode}
+                onChange={(e) => setEmergencyCode(e.target.value)}
+                className="min-w-0 flex-1 bg-transparent font-mono text-sm text-slate-900 outline-none placeholder:text-slate-400"
+              />
+            </div>
           </div>
-        </div>
+        ) : (
+          <div>
+            <label htmlFor="password" className="mb-1.5 block text-sm font-medium text-slate-800">
+              Password
+            </label>
+            <div className="input-glass flex items-center gap-2 px-3 py-2.5 hover:border-slate-300/80">
+              <IconLock className="h-5 w-5 shrink-0 text-slate-500" />
+              <input
+                id="password"
+                name="password"
+                type={showPassword ? "text" : "password"}
+                autoComplete="current-password"
+                placeholder="••••••••"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="min-w-0 flex-1 bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="flex shrink-0 items-center gap-1 text-xs font-medium text-slate-500 transition hover:text-portal-blue focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-portal-blue"
+              >
+                <span className="hidden sm:inline">view</span>
+                {showPassword ? (
+                  <IconEyeOff className="h-5 w-5" aria-hidden />
+                ) : (
+                  <IconEye className="h-5 w-5" aria-hidden />
+                )}
+                <span className="sr-only">{showPassword ? "Hide password" : "Show password"}</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {error ? (
@@ -252,7 +326,38 @@ function LoginFormContent() {
         {loading ? "Signing in…" : "Continue"}
       </button>
 
-      {displayedAppId !== "ADMIN_APP" ? (
+      {isAdminApp && rateLimited && !emergencyMode ? (
+        <p className="text-center text-sm text-slate-600">
+          <button
+            type="button"
+            onClick={() => {
+              setEmergencyMode(true);
+              setError(null);
+            }}
+            className="font-medium text-[#1A80F8] underline-offset-2 hover:underline"
+          >
+            Iniciar con código de seguridad
+          </button>
+        </p>
+      ) : null}
+
+      {isAdminApp && emergencyMode ? (
+        <p className="text-center text-sm text-slate-600">
+          <button
+            type="button"
+            onClick={() => {
+              setEmergencyMode(false);
+              setEmergencyCode("");
+              setError(null);
+            }}
+            className="font-medium text-slate-600 underline-offset-2 hover:underline"
+          >
+            Volver al inicio de sesión
+          </button>
+        </p>
+      ) : null}
+
+      {!isAdminApp ? (
         <p className="text-center text-sm text-slate-600">
           <Link
             href={registerHref}
